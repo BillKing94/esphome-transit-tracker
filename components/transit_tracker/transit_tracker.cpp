@@ -2,6 +2,7 @@
 #include "string_utils.h"
 
 #include "esphome/core/log.h"
+#include "esphome/core/application.h"
 #include "esphome/components/json/json_util.h"
 #include "esphome/components/watchdog/watchdog.h"
 #include "esphome/components/network/util.h"
@@ -21,6 +22,33 @@ void TransitTracker::setup() {
   });
 
   this->connect_ws_();
+
+  this->set_interval("check_stale_trips", 10000, [this]() {
+    if (this->ws_client_.available() && !this->schedule_state_.trips.empty()) {
+      bool has_stale_trips = false;
+
+      this->schedule_state_.mutex.lock();
+
+      auto now = this->rtc_->now();
+      if (now.is_valid()) {
+        for (auto &trip : this->schedule_state_.trips) {
+          if (now.timestamp - trip.departure_time > 60) {
+            has_stale_trips = true;
+            break;
+          }
+        }
+      }
+
+      this->schedule_state_.mutex.unlock();
+
+      if (has_stale_trips) {
+        ESP_LOGD(TAG, "Stale trips detected, reconnecting");
+        ESP_LOGD(TAG, "  Current RTC time: %d", now.timestamp);
+        ESP_LOGD(TAG, "  Last heartbeat: %d", this->last_heartbeat_);
+        this->reconnect();
+      }
+    }
+  });
 }
 
 void TransitTracker::loop() {
@@ -29,14 +57,18 @@ void TransitTracker::loop() {
   if (this->last_heartbeat_ != 0 && millis() - this->last_heartbeat_ > 60000) {
     ESP_LOGW(TAG, "Heartbeat timeout, reconnecting");
     this->reconnect();
+    return;
   }
 }
 
-void TransitTracker::dump_config(){
+void TransitTracker::dump_config() {
   ESP_LOGCONFIG(TAG, "Transit Tracker:");
   ESP_LOGCONFIG(TAG, "  Base URL: %s", this->base_url_.c_str());
   ESP_LOGCONFIG(TAG, "  Schedule: %s", this->schedule_string_.c_str());
   ESP_LOGCONFIG(TAG, "  Limit: %d", this->limit_);
+  ESP_LOGCONFIG(TAG, "  List mode: %s", this->list_mode_.c_str());
+  ESP_LOGCONFIG(TAG, "  Display departure times: %s", this->display_departure_times_ ? "true" : "false");
+  ESP_LOGCONFIG(TAG, "  Unit display: %s", this->unit_display_ == UNIT_DISPLAY_LONG ? "long" : this->unit_display_ == UNIT_DISPLAY_SHORT ? "short" : "none");
 }
 
 void TransitTracker::reconnect() {
@@ -53,6 +85,7 @@ void TransitTracker::close(bool fully) {
 }
 
 void TransitTracker::on_shutdown() {
+  this->cancel_interval("check_stale_trips");
   this->close(true);
 }
 
@@ -107,6 +140,7 @@ void TransitTracker::on_ws_message_(websockets::WebsocketsMessage message) {
         .route_color = route_color,
         .headsign = headsign,
         .arrival_time = trip["arrivalTime"].as<time_t>(),
+        .departure_time = trip["departureTime"].as<time_t>(),
         .is_realtime = trip["isRealtime"].as<bool>(),
       });
     }
@@ -125,7 +159,22 @@ void TransitTracker::on_ws_message_(websockets::WebsocketsMessage message) {
 void TransitTracker::on_ws_event_(websockets::WebsocketsEvent event, String data) {
   if (event == websockets::WebsocketsEvent::ConnectionOpened) {
     ESP_LOGD(TAG, "WebSocket connection opened");
-    std::string message = "{\"event\":\"schedule:subscribe\",\"data\":{\"feedCode\":\"" + this->feed_code_ + "\",\"routeStopPairs\":\"" + this->schedule_string_ + "\",\"limit\":" + std::to_string(this->limit_) + "}}";
+
+    auto message = json::build_json([this](JsonObject root) {
+      root["event"] = "schedule:subscribe";
+
+      auto data = root.createNestedObject("data");
+
+      if (!this->feed_code_.empty()) {
+        data["feedCode"] = this->feed_code_;
+      }
+
+      data["routeStopPairs"] = this->schedule_string_;
+      data["limit"] = this->limit_;
+      data["sortByDeparture"] = this->display_departure_times_;
+      data["listMode"] = this->list_mode_;
+    });
+
     ESP_LOGV(TAG, "Sending message: %s", message.c_str());
     this->ws_client_.send(message.c_str());
   } else if (event == websockets::WebsocketsEvent::ConnectionClosed) {
@@ -176,6 +225,12 @@ void TransitTracker::connect_ws_() {
 
     if (this->connection_attempts_ >= 3) {
       this->status_set_error("Failed to connect to WebSocket server");
+    }
+
+    if (this->connection_attempts_ >= 15) {
+      ESP_LOGE(TAG, "Could not connect to WebSocket server within 15 attempts.");
+      ESP_LOGE(TAG, "It's likely that the network is not truly connected; rebooting the device to try to recover.");
+      App.reboot();
     }
 
     auto timeout = std::min(15000, this->connection_attempts_ * 5000);
@@ -236,19 +291,41 @@ std::string TransitTracker::from_now_(time_t unix_timestamp) const {
   }
 
   if (diff < 60) {
-    return "0min";
+    switch (this->unit_display_) {
+      case UNIT_DISPLAY_LONG:
+        return "0min";
+      case UNIT_DISPLAY_SHORT:
+        return "0m";
+      case UNIT_DISPLAY_NONE:
+        return "0";
+    }
   }
 
   int minutes = diff / 60;
 
   if (minutes < 60) {
-    return str_sprintf("%dmin", minutes);
+    switch (this->unit_display_) {
+      case UNIT_DISPLAY_LONG:
+        return str_sprintf("%dmin", minutes);
+      case UNIT_DISPLAY_SHORT:
+        return str_sprintf("%dm", minutes);
+      case UNIT_DISPLAY_NONE:
+      default:
+        return str_sprintf("%d", minutes);
+    }
   }
 
   int hours = minutes / 60;
   minutes = minutes % 60;
 
-  return str_sprintf("%dh%dm", hours, minutes);
+  switch (this->unit_display_) {
+    case UNIT_DISPLAY_LONG:
+    case UNIT_DISPLAY_SHORT:
+      return str_sprintf("%dh%dm", hours, minutes);
+    case UNIT_DISPLAY_NONE:
+    default:
+      return str_sprintf("%d:%02d", hours, minutes);
+  }
 }
 
 const uint8_t realtime_icon[6][6] = {
@@ -333,7 +410,12 @@ void HOT TransitTracker::draw_schedule() {
   }
 
   if (this->schedule_state_.trips.empty()) {
-    this->draw_text_centered_("No upcoming arrivals", Color(0x252627));
+    auto message = "No upcoming arrivals";
+    if (this->display_departure_times_) {
+      message = "No upcoming departures";
+    }
+
+    this->draw_text_centered_(message, Color(0x252627));
     return;
   }
 
@@ -346,16 +428,16 @@ void HOT TransitTracker::draw_schedule() {
     int route_width, route_x_offset, route_baseline, route_height;
     this->font_->measure(trip.route_name.c_str(), &route_width, &route_x_offset, &route_baseline, &route_height);
 
-    auto arrival_time = this->from_now_(trip.arrival_time);
+    auto time_display = this->from_now_(this->display_departure_times_ ? trip.departure_time : trip.arrival_time);
 
     int time_width, time_x_offset, time_baseline, time_height;
-    this->font_->measure(arrival_time.c_str(), &time_width, &time_x_offset, &time_baseline, &time_height);
+    this->font_->measure(time_display.c_str(), &time_width, &time_x_offset, &time_baseline, &time_height);
 
     int headsign_clipping_start = route_width + 3;
     int headsign_clipping_end = this->display_->get_width() - time_width - 2;
 
     Color time_color = trip.is_realtime ? Color(0x20FF00) : Color(0xa7a7a7);
-    this->display_->print(this->display_->get_width() + 1, y_offset, this->font_, time_color, display::TextAlign::TOP_RIGHT, arrival_time.c_str());
+    this->display_->print(this->display_->get_width() + 1, y_offset, this->font_, time_color, display::TextAlign::TOP_RIGHT, time_display.c_str());
 
     if (trip.is_realtime) {
       int icon_bottom_right_x = this->display_->get_width() - time_width - 2;
