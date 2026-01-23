@@ -490,6 +490,17 @@ void HOT TransitTracker::draw_schedule() {
     y_offset += nominal_font_height;
   }
 
+  {
+    Trip countdownTrip = {};
+    countdownTrip.route_color = Color(4, 124, 173);
+    countdownTrip.route_name = "2 Line";
+    countdownTrip.departure_time = 1774724400;
+    countdownTrip.arrival_time = 1774724400;
+    countdownTrip.headsign = "Opening";
+
+    this->draw_trip(countdownTrip, y_offset, nominal_font_height, uptime, rtc_now, false, nullptr, scroll_cycle_duration);
+  }
+
   this->schedule_state_.mutex.unlock();
 }
 

@@ -38,13 +38,26 @@ std::string Localization::fmt_duration_from_now(time_t unix_timestamp, uint rtc_
   int hours = minutes / 60;
   minutes = minutes % 60;
 
+  if (hours < 24) {
+    switch (this->unit_display_) {
+      case UNIT_DISPLAY_LONG:
+      case UNIT_DISPLAY_SHORT:
+        return str_sprintf("%d%s%d%s", hours, this->hours_short_string_.c_str(), minutes, this->minutes_short_string_.c_str());
+      case UNIT_DISPLAY_NONE:
+      default:
+        return str_sprintf("%d:%02d", hours, minutes);
+    }
+  }
+
+  int days = round((float)hours / 24);
+
   switch (this->unit_display_) {
     case UNIT_DISPLAY_LONG:
+      return str_sprintf("%d%s", days, this->days_long_string_.c_str());
     case UNIT_DISPLAY_SHORT:
-      return str_sprintf("%d%s%d%s", hours, this->hours_short_string_.c_str(), minutes, this->minutes_short_string_.c_str());
     case UNIT_DISPLAY_NONE:
     default:
-      return str_sprintf("%d:%02d", hours, minutes);
+      return str_sprintf("%d%s", days, this->days_short_string_.c_str());
   }
 }
 

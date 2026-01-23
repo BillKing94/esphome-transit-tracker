@@ -27,8 +27,10 @@ class Localization {
     UnitDisplay unit_display_ = UNIT_DISPLAY_LONG;
     std::string now_string_ = "Now";
     std::string minutes_long_string_ = "min";
+    std::string days_long_string_ = "days";
     std::string minutes_short_string_ = "m";
     std::string hours_short_string_ = "h";
+    std::string days_short_string_ = "d";
 };
 
 }  // namespace transit_tracker
